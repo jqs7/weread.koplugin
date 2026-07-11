@@ -6,6 +6,7 @@
 --]] --
 
 local logger = require("logger")
+local bit = require("bit")
 
 local Annotations = {}
 
@@ -18,11 +19,24 @@ Annotations.UNDERLINE_CSS = [[
 ]]
 
 -- 想法标记（星号）CSS 样式 — 浅色、右上角、小字号
-Annotations.THOUGHT_CSS = [[
+Annotations.THOUGHT_LINK_CSS = [[
 .wr-thought-link{text-decoration:none;color:inherit;}
 .wr-star{font-size:0.6em;vertical-align:super;line-height:0;color:#aaa;margin-left:1px;}
+]]
+
+-- 占位 aside 不含正文，下载时隐藏以免页尾出现空白脚注块
+Annotations.THOUGHT_PLACEHOLDER_HIDE_CSS = [[
 .weread-thought{display:none;}
 ]]
+
+--- 返回想法相关 CSS。inject=false 时隐藏空占位 aside；inject=true 时不隐藏，由阅读时 show_annotations 控制。
+function Annotations.thoughtCss(inject_thought_content)
+    local css = Annotations.THOUGHT_LINK_CSS
+    if inject_thought_content ~= true then
+        css = css .. "\n" .. Annotations.THOUGHT_PLACEHOLDER_HIDE_CSS
+    end
+    return css
+end
 
 --- 去除字符串开头的 UTF-8 BOM（\ufeff）。
 -- WeRead 的部分章节会携带 BOM，而下划线 range 索引通常不包含这个字符。
@@ -235,9 +249,28 @@ local function htmlEscape(text)
     return text
 end
 
+local buildOneThoughtAside
+
 --- 构建想法内容 aside 块（EPUB 标准脚注）。
 -- @return string  aside HTML
 function Annotations.buildThoughtAsides(thought_reviews, chapter_uid)
+    if type(thought_reviews) ~= "table" then return "" end
+    if not chapter_uid then return "" end
+
+    local parts = { '<section epub:type="footnotes">' }
+    for _, rv in ipairs(thought_reviews) do
+        local aside = buildOneThoughtAside(rv, chapter_uid)
+        if aside ~= "" then
+            parts[#parts + 1] = aside
+        end
+    end
+    parts[#parts + 1] = '</section>'
+    return table.concat(parts, "\n")
+end
+
+--- 构建想法占位 aside 块（不含想法内容，仅保留 range 元数据以便弹窗加载）。
+-- @return string  aside HTML
+function Annotations.buildThoughtPlaceholderAsides(thought_reviews, chapter_uid)
     if type(thought_reviews) ~= "table" then return "" end
     if not chapter_uid then return "" end
 
@@ -247,47 +280,198 @@ function Annotations.buildThoughtAsides(thought_reviews, chapter_uid)
         if rv.pageReviews and #rv.pageReviews > 0 then
             local range_str = rv.range or "0-0"
             local id = "thought_" .. tostring(chapter_uid) .. "_" .. range_str:gsub("-", "_")
-            parts[#parts + 1] = '<aside epub:type="footnote" id="' .. id .. '" class="footnote weread-thought">'
-
-            -- 引用原文（截断）
-            local abstract = nil
-            local first_pr = rv.pageReviews[1]
-            if first_pr and first_pr.review then
-                abstract = first_pr.review.abstract or first_pr.review.contextAbstract
-            end
-
-            for i, pr in ipairs(rv.pageReviews) do
-                local review = pr.review or {}
-                local author = review.author or {}
-                local name = author.nick or author.name or "匿名"
-                local content = review.content or ""
-                local likes = pr.likesCount or 0
-
-                parts[#parts + 1] = '<p style="white-space:pre-line">'
-
-                -- 第一条想法附带引用原文
-                if i == 1 and abstract then
-                    local q = truncateRunes(abstract, 50)
-                    parts[#parts + 1] = '<span style="color:#666;font-style:italic">「' ..
-                    htmlEscape(q) .. '」</span><br/>'
-                end
-
-                -- 作者 + 点赞
-                local meta = "▸ " .. htmlEscape(name)
-                if likes > 0 then meta = meta .. " · ♥ " .. likes end
-                parts[#parts + 1] = '<span style="color:#999;font-size:0.85em">' .. meta .. '</span><br/>'
-
-                -- 正文
-                parts[#parts + 1] = '<span>' .. htmlEscape(content) .. '</span>'
-                parts[#parts + 1] = '</p>'
-            end
-
+            parts[#parts + 1] = '<aside epub:type="footnote" id="' .. id .. '" class="footnote weread-thought" data-thought-cached="1">'
             parts[#parts + 1] = '</aside>'
         end
     end
 
     parts[#parts + 1] = '</section>'
+    return table.concat(parts)
+end
+
+-- Encode a Unicode codepoint as UTF-8 bytes (LuaJIT 5.1 compatible).
+local function utf8_char(n)
+    if n < 0x80 then
+        return string.char(n)
+    elseif n < 0x800 then
+        return string.char(
+            0xC0 + bit.rshift(n, 6),
+            0x80 + bit.band(n, 0x3F)
+        )
+    elseif n < 0x10000 then
+        return string.char(
+            0xE0 + bit.rshift(n, 12),
+            0x80 + bit.band(bit.rshift(n, 6), 0x3F),
+            0x80 + bit.band(n, 0x3F)
+        )
+    else
+        return string.char(
+            0xF0 + bit.rshift(n, 18),
+            0x80 + bit.band(bit.rshift(n, 12), 0x3F),
+            0x80 + bit.band(bit.rshift(n, 6), 0x3F),
+            0x80 + bit.band(n, 0x3F)
+        )
+    end
+end
+
+local function stripHtmlTags(html)
+    if type(html) ~= "string" or html == "" then return "" end
+    -- Decode entities before stripping tags, so encoded tags like &lt;br&gt;
+    -- are decoded to <br> and then properly stripped.
+    html = html:gsub("&nbsp;", " "):gsub("&amp;", "&"):gsub("&lt;", "<"):gsub("&gt;", ">"):gsub("&quot;", '"'):gsub("&apos;", "'")
+    html = html:gsub("&#[xX]([0-9a-fA-F]+);", function(h)
+        local n = tonumber(h, 16)
+        if n and n >= 0x20 and n <= 0x10FFFF and not (n >= 0xD800 and n <= 0xDFFF) then
+            return utf8_char(n)
+        end
+        return ""
+    end)
+    html = html:gsub("&#(%d+);", function(n)
+        local d = tonumber(n)
+        if d and d >= 0x20 and d <= 0x10FFFF and not (d >= 0xD800 and d <= 0xDFFF) then
+            return utf8_char(d)
+        end
+        return ""
+    end)
+    html = html:gsub("<br[^>]*>", "\n"):gsub("</p>", "\n"):gsub("<[^>]+>", "")
+    return (html:match("^%s*(.-)%s*$") or "")
+end
+
+local function normalizePageReview(pr)
+    if type(pr) ~= "table" then return nil end
+    if type(pr.review) == "table" then return pr end
+    if pr.content or pr.abstract or pr.author or pr.htmlContent then
+        return {
+            review = pr,
+            likesCount = pr.likesCount or pr.likeCount or 0,
+            reviewId = pr.reviewId,
+        }
+    end
+    return pr
+end
+
+local function extractReviewText(review)
+    if type(review) ~= "table" then return "" end
+    local content = review.content
+    if type(content) == "string" and content:match("%S") then
+        return content
+    end
+    local html_content = review.htmlContent
+    if type(html_content) == "string" and html_content ~= "" then
+        local plain = stripHtmlTags(html_content)
+        if plain:match("%S") then return plain end
+    end
+    return ""
+end
+
+local function buildThoughtQuoteHtml(quote)
+    if type(quote) ~= "string" or quote == "" then return nil end
+    quote = quote:match("^%s*(.-)%s*$") or quote
+    if quote == "" then return nil end
+    local q = truncateRunes(quote, 50)
+    return '<span style="color:#666;font-style:italic">「' .. htmlEscape(q) .. '」</span><br/>'
+end
+
+buildOneThoughtAside = function(rv, chapter_uid)
+    if type(rv) ~= "table" or not rv.pageReviews or #rv.pageReviews == 0 then
+        return ""
+    end
+    local range_str = rv.range or "0-0"
+    local id = "thought_" .. tostring(chapter_uid) .. "_" .. range_str:gsub("-", "_")
+    local parts = {
+        '<aside epub:type="footnote" id="' .. id .. '" class="footnote weread-thought">',
+    }
+
+    local quote = rv.quotedText
+    if type(quote) ~= "string" or quote == "" then
+        local first_pr = normalizePageReview(rv.pageReviews[1])
+        local first_review = first_pr and first_pr.review or {}
+        quote = first_review.abstract or first_review.contextAbstract
+    end
+    local quote_html = buildThoughtQuoteHtml(quote)
+
+    local wrote_quote = false
+    for _, raw_pr in ipairs(rv.pageReviews) do
+        local pr = normalizePageReview(raw_pr) or raw_pr
+        local review = pr.review or {}
+        local author = review.author or {}
+        local name = author.nick or author.name or "匿名"
+        local content = extractReviewText(review)
+        local likes = pr.likesCount or 0
+
+        parts[#parts + 1] = '<p style="white-space:pre-line">'
+        if not wrote_quote and quote_html then
+            parts[#parts + 1] = quote_html
+            wrote_quote = true
+        end
+
+        local meta = "▸ " .. htmlEscape(name)
+        if likes > 0 then meta = meta .. " · ♥ " .. likes end
+        parts[#parts + 1] = '<span style="color:#999;font-size:0.85em">' .. meta .. '</span><br/>'
+
+        if content ~= "" then
+            parts[#parts + 1] = '<span>' .. htmlEscape(content) .. '</span>'
+        else
+            parts[#parts + 1] = '<span></span>'
+        end
+        parts[#parts + 1] = '</p>'
+    end
+
+    parts[#parts + 1] = '</aside>'
     return table.concat(parts, "\n")
+end
+
+--- 构建弹窗用 HTML（单个 aside，无 section 包裹）。
+function Annotations.buildThoughtPopupHtml(thought_reviews, chapter_uid)
+    if type(thought_reviews) ~= "table" or not chapter_uid then return "" end
+    if thought_reviews.range and thought_reviews.pageReviews then
+        return buildOneThoughtAside(thought_reviews, chapter_uid)
+    end
+    for _, rv in ipairs(thought_reviews) do
+        local aside = buildOneThoughtAside(rv, chapter_uid)
+        if aside ~= "" then
+            return aside
+        end
+    end
+    return ""
+end
+
+--- 解析想法 aside 的 id 或链接 href，返回 chapter_uid 与 range 字符串。
+-- crengine 的 getHTMLFromXPointer 对脚注目标常省略 id，但来源 <a href="#thought_…"> 仍保留。
+function Annotations.parseThoughtRef(html)
+    if type(html) ~= "string" or html == "" then
+        return nil, nil
+    end
+
+    -- Strip crengine fragment prefix (e.g. "_doc_fragment_0_ thought_..." -> "thought_...")
+    local function parseThoughtId(id)
+        if not id then return nil, nil end
+        local clean = id:match("(thought_%d+_.+)$") or id
+        local chapter_uid, range_part = clean:match("^thought_(%d+)_(.+)$")
+        if not chapter_uid or not range_part then return nil, nil end
+        return tonumber(chapter_uid), range_part:gsub("_", "-")
+    end
+
+    -- Match id attribute allowing crengine prefix before "thought_"
+    local token = html:match('id="([^"]*thought_[%d_]+)"')
+        or html:match("id='([^']*thought_[%d_]+)'")
+    if token then
+        local uid, range = parseThoughtId(token)
+        if uid and range then return uid, range end
+    end
+
+    -- Match href attribute allowing crengine prefix in fragment
+    local href = html:match('href="#([^"]*thought_[^"]+)"')
+        or html:match("href='#([^']*thought_[^']+)'")
+        or html:match('href="([^"]*#[^"]*thought_[^"]+)"')
+        or html:match("href='([^']*#[^']*thought_[^']+)'")
+    if href then
+        local fragment = href:match("#(.*thought_%d+_.+)$") or href
+        local uid, range = parseThoughtId(fragment)
+        if uid and range then return uid, range end
+    end
+
+    return nil, nil
 end
 
 --- 在 HTML 中注入下划线标记。
@@ -445,7 +629,9 @@ end
 -- @table  chapter_underlines  章节划线数据（来自 API）
 -- @table  thought_reviews  想法数据 map（可选），keyed by range string
 -- @return processed_html, css  处理后的 HTML 和额外的 CSS
-function Annotations.process(html, chapter_underlines, thought_reviews)
+function Annotations.process(html, chapter_underlines, thought_reviews, opts)
+    opts = opts or {}
+    local inject_thought_content = opts.inject_thought_content == true
     if type(html) ~= "string" or html == "" then
         return html, ""
     end
@@ -482,7 +668,12 @@ function Annotations.process(html, chapter_underlines, thought_reviews)
     if thought_map and processed ~= html then
         local chapter_uid = chapter_underlines.chapterUid
         if chapter_uid and thought_reviews then
-            local aside_html = Annotations.buildThoughtAsides(thought_reviews, chapter_uid)
+            local aside_html
+            if inject_thought_content then
+                aside_html = Annotations.buildThoughtAsides(thought_reviews, chapter_uid)
+            else
+                aside_html = Annotations.buildThoughtPlaceholderAsides(thought_reviews, chapter_uid)
+            end
             if aside_html ~= "" then
                 local last_body = processed:find("</body>", 1, true)
                 if last_body then
@@ -497,7 +688,7 @@ function Annotations.process(html, chapter_underlines, thought_reviews)
     if processed ~= html then
         local css = Annotations.UNDERLINE_CSS
         if thought_map then
-            css = css .. "\n" .. Annotations.THOUGHT_CSS
+            css = css .. "\n" .. Annotations.thoughtCss(inject_thought_content)
         end
         return processed, css
     end

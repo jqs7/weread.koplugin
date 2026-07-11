@@ -22,6 +22,7 @@ local zh = {
     ["Book images"] = "书籍图片",
     ["Public account article images"] = "公众号文章图片",
     ["Underlines and thoughts"] = "划线和想法",
+    ["Inject thoughts into EPUB"] = "将想法内容写入 EPUB",
     ["Downloading public account article images may significantly increase download time. Continue?"] = "下载公众号文章图片可能会显著延长下载时间，是否继续？",
     ["Downloading underlines and thoughts adds requests for every chapter and may significantly increase download time and cache usage. Continue?"] = "下载划线和想法会为每个章节增加额外请求，并可能显著延长下载时间和增加缓存占用。是否继续？",
     ["Confirm"] = "确认",

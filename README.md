@@ -12,7 +12,7 @@
 - 下载单章或整本书为 EPUB，直接在 KOReader 中阅读
 - 章节内容解码、CSS 样式、图片资源打包
 - 自动生成目录（TOC），自动嵌入封面
-- 下载并嵌入划线和想法，阅读时可一键显示/隐藏，点击划线查看想法内容
+- 下载并嵌入划线和想法，可选是否将想法原文写入 EPUB，阅读时可一键显示/隐藏，点击划线查看想法内容
 
 **公众号**
 
@@ -187,7 +187,8 @@ curl 'https://weread.qq.com/web/mp/articles?bookId=...' \
 │   ├── 下载内容
 │   │   ├── 书籍图片（默认开启）
 │   │   ├── 公众号文章图片（默认关闭）
-│   │   └── 划线和想法（默认关闭）
+│   │   ├── 划线和想法（默认关闭）
+│   │   └── 将想法内容写入 EPUB（默认关闭，需开启划线和想法）
 │   └── 账号管理
 │       ├── 账号状态
 │       └── 清除账号数据
@@ -208,9 +209,12 @@ weread.koplugin/
 │   ├── content.lua         内容解码、EPUB/HTML 生成
 │   ├── cookie.lua          Cookie 解析
 │   ├── crypto.lua          SHA-256、MD5
+│   ├── annotations.lua     划线/想法 HTML 构建
 │   ├── download_dialog.lua 下载进度对话框
 │   ├── i18n.lua            中文翻译
 │   ├── settings.lua        设置持久化
+│   ├── thoughts.lua        想法缓存 I/O
+│   ├── thought_popup.lua   想法弹窗 Widget
 │   └── weread.lua          微信读书协议工具
 ├── scripts/
 │   ├── fetch_weread_epub.py     EPUB 生成参考脚本

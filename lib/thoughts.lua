@@ -59,6 +59,72 @@ function Thoughts.save_cache(settings, book_id, chapter_uid, reviews)
     return true
 end
 
+local function normalize_thought_range(range_str)
+    if type(range_str) ~= "string" then return range_str end
+    return range_str:gsub("_", "-")
+end
+
+--- Read thought content from local JSON cache for popup display.
+-- @string book_dir   directory containing the book's chapter EPUBs
+-- @number chapter_uid
+-- @string range_str  e.g. "383-415"
+-- @return aside_html or nil
+function Thoughts.load_cache(book_dir, chapter_uid, range_str)
+    if type(book_dir) ~= "string" or book_dir == "" then
+        log_info("thought cache skip, empty book_dir")
+        return nil
+    end
+    if not chapter_uid or not range_str then
+        log_info("thought cache skip, missing chapter_uid/range")
+        return nil
+    end
+
+    local cache_path = book_dir .. "/thoughts/" .. tostring(chapter_uid) .. ".json"
+    local f = io.open(cache_path, "r")
+    if not f then
+        log_info("thought cache miss", cache_path)
+        return nil
+    end
+    local raw = f:read("*a")
+    f:close()
+    if not raw or raw == "" then
+        log_info("thought cache empty read", "path=", cache_path)
+        return nil
+    end
+
+    local ok, reviews = pcall(require("json").decode, raw)
+    if not ok then
+        ok, reviews = pcall(function()
+            return require("rapidjson"):decode(raw)
+        end)
+    end
+    if not ok or type(reviews) ~= "table" then
+        log_info("thought cache decode failed", cache_path)
+        return nil
+    end
+
+    local want_range = normalize_thought_range(range_str)
+    local matched
+    for _, rv in ipairs(reviews) do
+        if normalize_thought_range(rv.range) == want_range and rv.pageReviews and #rv.pageReviews > 0 then
+            matched = rv
+            break
+        end
+    end
+    if not matched then
+        log_info("thought cache range miss", range_str, "chapter_uid=", chapter_uid)
+        return nil
+    end
+
+    local aside_html = Annotations.buildThoughtPopupHtml(matched, chapter_uid)
+    if aside_html == "" then
+        log_info("thought cache build empty html", "chapter_uid=", chapter_uid, "range=", range_str)
+        return nil
+    end
+    log_info("thought cache hit", "chapter_uid=", chapter_uid, "range=", range_str, "items=", #matched.pageReviews, "html_len=", #aside_html)
+    return aside_html
+end
+
 function Thoughts.collect_ranges(underlines_data)
     local ranges = {}
     if type(underlines_data) ~= "table" then
@@ -95,7 +161,7 @@ function Thoughts.fetch_underlines(client, settings, book_id, chapter_uid)
     return true, data, Thoughts.collect_ranges(data)
 end
 
-function Thoughts.apply_data(settings, book_id, chapter_uid, xhtml, underlines_data, reviews)
+function Thoughts.apply_data(settings, book_id, chapter_uid, xhtml, underlines_data, reviews, inject_thoughts_into_epub)
     if type(underlines_data) ~= "table" then
         return xhtml, ""
     end
@@ -103,14 +169,14 @@ function Thoughts.apply_data(settings, book_id, chapter_uid, xhtml, underlines_d
         Thoughts.save_cache(settings, book_id, chapter_uid, reviews)
     end
     underlines_data.chapterUid = chapter_uid
-    local processed, annotation_css = Annotations.process(xhtml, underlines_data, reviews)
+    local processed, annotation_css = Annotations.process(xhtml, underlines_data, reviews, { inject_thought_content = inject_thoughts_into_epub })
     if processed ~= xhtml then
         log_info("injected underlines for chapter:", chapter_uid)
     end
     return processed, annotation_css or ""
 end
 
-function Thoughts.apply(client, settings, book_id, chapter_uid, xhtml)
+function Thoughts.apply(client, settings, book_id, chapter_uid, xhtml, inject_thoughts_into_epub)
     if type(xhtml) ~= "string" or xhtml == "" then
         return xhtml, ""
     end
@@ -139,7 +205,7 @@ function Thoughts.apply(client, settings, book_id, chapter_uid, xhtml)
             thought_reviews = tr_data.reviews
         end
     end
-    return Thoughts.apply_data(settings, book_id, chapter_uid, xhtml, ul_data, thought_reviews)
+    return Thoughts.apply_data(settings, book_id, chapter_uid, xhtml, ul_data, thought_reviews, inject_thoughts_into_epub)
 end
 
 function Thoughts.merge_css(base_css, annotation_css)

@@ -918,7 +918,8 @@ local function apply_chapter_annotations(client, settings, book, chapter, xhtml,
     end
     local book_id = book.book_id or book.bookId
     local chapter_uid = chapter and chapter.chapterUid
-    local processed, annotation_css = Thoughts.apply(client, settings, book_id, chapter_uid, xhtml)
+    local inject_thoughts = cache.inject_thoughts_into_epub == true
+    local processed, annotation_css = Thoughts.apply(client, settings, book_id, chapter_uid, xhtml, inject_thoughts)
     return processed, Thoughts.merge_css(css, annotation_css)
 end
 

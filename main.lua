@@ -23,6 +23,7 @@ local I18n = require("lib.i18n")
 local Settings = require("lib.settings")
 local Thoughts = require("lib.thoughts")
 local WeRead = require("lib.weread")
+local Annotations = require("lib.annotations")
 local ThoughtPopup = require("lib.thought_popup")
 
 -- `_` is the translation function; never reuse it as a loop placeholder in this file.
@@ -483,6 +484,7 @@ function WeReadPlugin:getSettingsMenuItems()
                             local cache = self.settings:get("cache")
                             if cache.download_underlines_and_thoughts then
                                 cache.download_underlines_and_thoughts = false
+                                cache.inject_thoughts_into_epub = false
                                 self.settings:set("cache", cache)
                                 self.settings:flush()
                                 logger.info(LOG_MODULE,
@@ -503,6 +505,28 @@ function WeReadPlugin:getSettingsMenuItems()
                                 end),
                                 cancel_text = _("Cancel"),
                             })
+                        end),
+                    },
+                    {
+                        text = _("Inject thoughts into EPUB"),
+                        keep_menu_open = true,
+                        enabled_func = function()
+                            return self.settings:get("cache").download_underlines_and_thoughts
+                        end,
+                        checked_func = function()
+                            return self.settings:get("cache").inject_thoughts_into_epub
+                        end,
+                        callback = self:safeCallback(_("Inject thoughts into EPUB"), function()
+                            local cache = self.settings:get("cache")
+                            if not cache.download_underlines_and_thoughts then return end
+                            cache.inject_thoughts_into_epub = not cache.inject_thoughts_into_epub
+                            self.settings:set("cache", cache)
+                            self.settings:flush()
+                            logger.info(
+                                LOG_MODULE,
+                                "inject thoughts into EPUB setting changed:",
+                                "enabled=", tostring(cache.inject_thoughts_into_epub)
+                            )
                         end),
                     },
                 }
@@ -2315,9 +2339,11 @@ function WeReadPlugin:_applyCurrentAnnotations(dl)
         T(_("Processing underlines and thoughts · chapter %1/%2"), tostring(dl.index), tostring(dl.total)),
         dl.index - 0.15)
     local started = time.now()
+    local cache = self.settings:get("cache", {})
+    local inject_thoughts = cache.inject_thoughts_into_epub == true
     local ok, processed, annotation_css = pcall(function()
         return Thoughts.apply_data(self.settings, book_id, chapter.chapterUid,
-            dl.current.xhtml, annotation.underlines, annotation.reviews)
+            dl.current.xhtml, annotation.underlines, annotation.reviews, inject_thoughts)
     end)
     self:_downloadPerf(dl, "apply_annotations", started, "ok=", tostring(ok),
         "reviews=", tostring(#annotation.reviews))
@@ -2743,8 +2769,13 @@ end
 -- NOTE: only tweak visual/metric properties (border, padding, font-size). Never
 -- use display/white-space here — changing those marks the built DOM stale and
 -- makes ReaderRolling repeatedly prompt for a full document reload.
+-- Injected thought footnotes (.weread-thought) are collapsed the same way when
+-- inject_thoughts_into_epub is enabled and the reader hides annotations.
 local ANNOTATION_HIDE_CSS =
-    ".wr-underline{border-bottom:0 !important;padding-bottom:0 !important;} .wr-star{font-size:0 !important;}"
+    ".wr-underline{border-bottom:0 !important;padding-bottom:0 !important;} "
+    .. ".wr-star{font-size:0 !important;} "
+    .. ".weread-thought{font-size:0 !important;line-height:0 !important;max-height:0 !important;"
+    .. "overflow:hidden !important;padding:0 !important;margin:0 !important;border:0 !important;}"
 
 -- Apply the initial hidden state before KOReader renders the document. Doing
 -- this from onReaderReady starts partial rerendering; its seamless reload then
@@ -3004,22 +3035,67 @@ function WeReadPlugin:_onThoughtTap(ges)
         end
         html = cached
     else
-        local extract_started = time.now()
-        -- The generated EPUB groups all thought asides in one footnotes section.
-        -- Asking CREngine for the "final parent" expands a single target aside
-        -- to that whole section, which mixes unrelated thoughts and makes MuPDF
-        -- lay out hundreds of footnotes. The link target itself is already the
-        -- complete <aside>, so keep extraction scoped to that node.
-        html = self.ui.document:getHTMLFromXPointer(link.xpointer, 0x1001, false)
-        thought_perf("extract_html", extract_started,
-            "html_bytes=", tostring(type(html) == "string" and #html or 0))
-        if type(html) ~= "string" or not html:find("weread%-thought") then
-            self._thought_html_cache = self._thought_html_cache or {}
-            self._thought_html_cache[link.xpointer] = false
-            return false
-        end
+        -- Try multiple xpointers: crengine may return source <a> instead of target <aside>
+        -- for empty elements, or omit the id attribute from the target.
+        -- Use from_parent=false to avoid expanding to the whole footnotes section.
         self._thought_html_cache = self._thought_html_cache or {}
-        self._thought_html_cache[link.xpointer] = html
+        local xps = { link.xpointer, link.a_xpointer, link.from_xpointer }
+        local footnote_html, chapter_uid, range_str
+        for _, xp in ipairs(xps) do
+            if xp then
+                local h = self.ui.document:getHTMLFromXPointer(xp, 0x1001, false)
+                if type(h) == "string" and h ~= "" then
+                    if not footnote_html and h:find("weread%-thought") then
+                        footnote_html = h
+                    end
+                    if not chapter_uid then
+                        chapter_uid, range_str = Annotations.parseThoughtRef(h)
+                    end
+                    if footnote_html and chapter_uid then break end
+                end
+            end
+        end
+        -- No footnote HTML from any xpointer: try cache with extracted ref.
+        if not footnote_html then
+            if chapter_uid and range_str then
+                local book_dir
+                if self.ui and self.ui.document and self.ui.document.file then
+                    book_dir = self.ui.document.file:match("^(.*)/[^/]+$")
+                end
+                local cached = Thoughts.load_cache(book_dir, chapter_uid, range_str)
+                if cached then
+                    html = cached
+                    self._thought_html_cache[link.xpointer] = html
+                else
+                    self._thought_html_cache[link.xpointer] = false
+                    return false
+                end
+            else
+                self._thought_html_cache[link.xpointer] = false
+                return false
+            end
+        else
+            -- Placeholder aside: load content from JSON cache.
+            if footnote_html:find("data%-thought%-cached") then
+                if not chapter_uid then
+                    self._thought_html_cache[link.xpointer] = false
+                    return false
+                end
+                local book_dir
+                if self.ui and self.ui.document and self.ui.document.file then
+                    book_dir = self.ui.document.file:match("^(.*)/[^/]+$")
+                end
+                local cached = Thoughts.load_cache(book_dir, chapter_uid, range_str)
+                if not cached then
+                    self._thought_html_cache[link.xpointer] = false
+                    return false
+                end
+                html = cached
+            else
+                html = footnote_html
+            end
+            self._thought_html_cache[link.xpointer] = html
+        end
     end
     thought_perf("tap_resolve", tap_started, "cache_hit=", tostring(cache_hit),
         "html_bytes=", tostring(#html))
