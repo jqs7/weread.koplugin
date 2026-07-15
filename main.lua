@@ -24,6 +24,8 @@ local Settings = require("lib.settings")
 local Thoughts = require("lib.thoughts")
 local WeRead = require("lib.weread")
 local ThoughtPopup = require("lib.thought_popup")
+local CoverCache = require("lib.cover_cache")
+local ShelfUI = require("lib.shelf_ui")
 
 -- `_` is the translation function; never reuse it as a loop placeholder in this file.
 local function _(text)
@@ -885,6 +887,46 @@ function WeReadPlugin:shelfToolbarItems(with_filters, refresh)
     return items
 end
 
+
+function WeReadPlugin:formatCoverCacheSummary(stats)
+    stats = stats or CoverCache.stats()
+    if stats.files == 0 then
+        return _("empty")
+    end
+    return T(_("%1 files, %2"), tostring(stats.files), CoverCache.formatBytes(stats.bytes))
+end
+
+function WeReadPlugin:confirmClearCoverCache()
+    local stats = CoverCache.stats()
+    if stats.files == 0 then
+        self:showTransientInfo(_("Cover cache is empty"), 2)
+        return
+    end
+    UIManager:show(ConfirmBox:new{
+        text = T(_("Clear cover cache? %1 cover file(s) (about %2) will be deleted."),
+            tostring(stats.files), CoverCache.formatBytes(stats.bytes)),
+        ok_text = _("Clear"),
+        ok_callback = function()
+            local ok, cleared = CoverCache.clearAll()
+            if not ok then
+                self:showTransientInfo(_("Failed to clear cover cache"))
+                return
+            end
+            if self._shelf_refresh then
+                local shelf_ok, err = pcall(self._shelf_refresh)
+                if not shelf_ok then
+                    logger.warn(LOG_MODULE, "refresh shelf after cover clear failed:", log_error(err))
+                end
+            end
+            if self.cache_menu then
+                self:refreshCacheManagement(T(_("Cover cache cleared (%1 file(s))"), tostring(cleared or 0)))
+            else
+                self:showTransientInfo(T(_("Cover cache cleared (%1 file(s))"), tostring(cleared or 0)))
+            end
+        end,
+    })
+end
+
 function WeReadPlugin:showCacheManagement()
     local lfs = require("libs/libkoreader-lfs")
     local books = self.settings:get("books", {})
@@ -961,6 +1003,14 @@ function WeReadPlugin:showCacheManagement()
     local mp_total_str = mp_total_size < 1024 * 1024
         and string.format("%.0f KB", mp_total_size / 1024)
         or string.format("%.1f MB", mp_total_size / 1024 / 1024)
+    local cover_stats = CoverCache.stats()
+    local cover_total_str = self:formatCoverCacheSummary(cover_stats)
+    table.insert(items, {
+        text = T(_("[Cleanup] Clear cover cache (%1)"), cover_total_str),
+        callback = self:safeCallback(_("Clear cover cache"), function()
+            self:confirmClearCoverCache()
+        end),
+    })
     table.insert(items, {
         text = T(_("[Cleanup] Clear all public account cache (%1)"), mp_total_str),
         callback = self:safeCallback(_("Clear all public account cache"), function()
@@ -1019,7 +1069,7 @@ end
 
 function WeReadPlugin:confirmClearBookCache(book_id, title, on_cleared)
     UIManager:show(ConfirmBox:new{
-        text = T(_("Clear cache for \"%1\"?"), title),
+        text = T(_("Clear cache for \"%1\"? Downloaded content and the cover thumbnail will be deleted."), title),
         ok_text = _("Clear"),
         ok_callback = function()
             self:clearBookCache(book_id)
@@ -1037,6 +1087,7 @@ function WeReadPlugin:clearBookCache(book_id)
     local books = self.settings:get("books", {})
     local cache_dir = Content.book_resolved_dir(self.settings, book_id, books[book_id])
     os.execute("rm -rf " .. string.format("%q", cache_dir))
+    CoverCache.clearBook(book_id)
     if books[book_id] then
         books[book_id].cached_file = nil
         books[book_id].cached_chapters = nil
@@ -1552,7 +1603,9 @@ function WeReadPlugin:showShelfPage()
     end
     local menu, buildItems
     local function refresh()
-        menu:switchItemTable(nil, buildItems())
+        if menu then
+            menu:switchItemTable(nil, buildItems())
+        end
     end
     buildItems = function()
         local items = self:shelfToolbarItems(true, refresh)
@@ -1585,6 +1638,8 @@ function WeReadPlugin:showShelfPage()
                         local current = self._shelf_saved_books and self._shelf_saved_books[book_id]
                         return rightStatus(current and file_exists(current.cached_file))
                     end,
+                    book = book,
+                    cover_bb = nil,
                     callback = self:safeCallback(book.title or book.bookId or _("Untitled"), function()
                         self:showBookRecord(book)
                     end),
@@ -1593,7 +1648,14 @@ function WeReadPlugin:showShelfPage()
         end
         return items
     end
-    menu = self:showList(_("WeRead Bookshelf"), buildItems(), _("Your WeRead shelf is empty."))
+    menu = ShelfUI.show{
+        plugin = self,
+        title = _("WeRead Bookshelf"),
+        buildItems = buildItems,
+        onEmpty = function()
+            self:showInfo(_("Your WeRead shelf is empty."))
+        end,
+    }
     self.shelf_menu = menu
     self._shelf_refresh = refresh
 end
