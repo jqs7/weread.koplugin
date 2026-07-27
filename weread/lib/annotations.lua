@@ -18,9 +18,12 @@ Annotations.UNDERLINE_CSS = [[
 ]]
 
 -- 想法标记（星号）CSS 样式 — 浅色、右上角、小字号
+-- ::before 插入 U+2060 WORD JOINER，避免 CREngine/libunibreak
+-- 在 CJK 字符与 "*" 之间断行导致星号落到行首（KOReader 官方推荐的 glue 写法）。
 Annotations.THOUGHT_CSS = [[
 .wr-thought-link{text-decoration:none;color:inherit;}
 .wr-star{font-size:0.6em;vertical-align:super;line-height:0;color:#aaa;margin-left:1px;}
+.wr-star::before{content:"\2060";}
 ]]
 
 --- 去除字符串开头的 UTF-8 BOM（\ufeff）。
