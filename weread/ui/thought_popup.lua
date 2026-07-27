@@ -251,6 +251,21 @@ function NativeThoughtPopup:init(reinit)
     self.height = math.floor(Screen:getHeight() * self.height_ratio)
     self.show_menu = false
     self.add_default_buttons = false
+
+    if Device:hasKeys() then
+        local group = Device.input.group or {}
+        self.key_events = {
+            Close = { { group.Back } },
+        }
+        local prev_key = group.PgBack or group.PageBack or group.PageBackward or group.Left
+        local next_key = group.PgFwd or group.PageForward or group.PageNext or group.Right
+        if prev_key then
+            self.key_events.PreviousThought = { { prev_key } }
+        end
+        if next_key then
+            self.key_events.NextThought = { { next_key } }
+        end
+    end
     self.text_type = "general"
     self.alignment = "left"
     self.auto_para_direction = true
@@ -296,10 +311,21 @@ function NativeThoughtPopup:changePage(delta)
     UIManager:setDirty(self, "partial", self.frame.dimen)
 end
 
+function NativeThoughtPopup:onPreviousThought()
+    self:changePage(-1)
+    return true
+end
+
+function NativeThoughtPopup:onNextThought()
+    self:changePage(1)
+    return true
+end
+
 function NativeThoughtPopup:onClose()
     UIManager:close(self)
     return true
 end
+
 
 function NativeThoughtPopup:onCloseWidget()
     TextViewer.onCloseWidget(self)
